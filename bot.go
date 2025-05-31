@@ -35,13 +35,16 @@ type (
 	Bot struct {
 		BaseBot
 		db *ReminderDB
-		f  *fsm.FSM
 	}
 	ContextStruct struct {
 		ctx    context.Context
 		userId TGUserId
 		chatId TGChatId
 	}
+)
+
+var (
+	fsmStates *fsm.FSM
 )
 
 func NewBot(token string) *Bot {
@@ -51,32 +54,31 @@ func NewBot(token string) *Bot {
 		panic(err)
 	}
 
-	b := new(Bot)
+	reminderBot := &Bot{
+		BaseBot: BaseBot{},
+		db:      NewReminderDB(dbConn),
+	}
 
 	opts := []bot.Option{
-		bot.WithDefaultHandler(b.HandleDefault),
-		bot.WithMessageTextHandler(SET_REMINDER_COMMAND, bot.MatchTypeExact, b.HandleSetReminder),
-		bot.WithMessageTextHandler(GET_REMINDERS_COMMAND, bot.MatchTypeExact, b.HandleGetReminders),
-		bot.WithCallbackQueryDataHandler("remove_reminder_", bot.MatchTypePrefix, b.RemoveReminder),
+		bot.WithDefaultHandler(reminderBot.HandleDefault),
+		bot.WithMessageTextHandler(SET_REMINDER_COMMAND, bot.MatchTypeExact, reminderBot.HandleSetReminder),
+		bot.WithMessageTextHandler(GET_REMINDERS_COMMAND, bot.MatchTypeExact, reminderBot.HandleGetReminders),
+		bot.WithCallbackQueryDataHandler("remove_reminder_", bot.MatchTypePrefix, reminderBot.RemoveReminder),
 	}
 
 	baseBot, err := bot.New(token, opts...)
+
+	reminderBot.BaseBot.Bot = baseBot
 
 	if err != nil {
 		panic(err)
 	}
 
-	reminderBot := &Bot{
-		BaseBot: BaseBot{
-			Bot: baseBot,
-		},
-		db: NewReminderDB(dbConn),
-		f: fsm.New(stateDefault, map[fsm.StateID]fsm.Callback{
-			stateAskReminder: b.callbackSetReminder,
-			stateAskTime:     b.callbackSetTime,
-			stateFinish:      b.callbackFinish,
-		}),
-	}
+	fsmStates = fsm.New(stateDefault, map[fsm.StateID]fsm.Callback{
+		stateAskReminder: reminderBot.callbackSetReminder,
+		stateAskTime:     reminderBot.callbackSetTime,
+		stateFinish:      reminderBot.callbackFinish,
+	})
 
 	return reminderBot
 }
@@ -140,14 +142,14 @@ func (reminderBot *Bot) HandleSetReminder(ctx context.Context, _ *bot.Bot, updat
 		return
 	}
 
-	currentState := reminderBot.f.Current(int64(userId))
+	currentState := fsmStates.Current(int64(userId))
 	if currentState != stateDefault {
 		return
 	}
 
-	reminderBot.f.Set(int64(userId), "msgId", update.Message.ID)
+	fsmStates.Set(int64(userId), "msgId", update.Message.ID)
 
-	reminderBot.f.Transition(int64(userId), stateAskReminder, ContextStruct{
+	fsmStates.Transition(int64(userId), stateAskReminder, ContextStruct{
 		ctx:    ctx,
 		userId: userId,
 		chatId: chatId,
@@ -255,9 +257,9 @@ func (reminderBot *Bot) callbackSetTime(f *fsm.FSM, args ...any) {
 func (reminderBot *Bot) callbackFinish(f *fsm.FSM, args ...any) {
 	currentContext := args[0].(ContextStruct)
 
-	reminderMsg, _ := reminderBot.f.Get(int64(currentContext.userId), "reminder")
-	reminderTime, _ := reminderBot.f.Get(int64(currentContext.userId), "time")
-	msgIdStr, _ := reminderBot.f.Get(int64(currentContext.userId), "msgId")
+	reminderMsg, _ := fsmStates.Get(int64(currentContext.userId), "reminder")
+	reminderTime, _ := fsmStates.Get(int64(currentContext.userId), "time")
+	msgIdStr, _ := fsmStates.Get(int64(currentContext.userId), "msgId")
 
 	dbErr := reminderBot.db.saveReminderToDB(Reminder{
 		ChatId:  currentContext.chatId,
@@ -291,7 +293,7 @@ func (reminderBot *Bot) callbackFinish(f *fsm.FSM, args ...any) {
 		}, "🗿")
 	}
 
-	reminderBot.f.Transition(int64(currentContext.userId), stateDefault)
+	fsmStates.Transition(int64(currentContext.userId), stateDefault)
 }
 
 func (reminderBot *Bot) HandleDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -302,7 +304,7 @@ func (reminderBot *Bot) HandleDefault(ctx context.Context, b *bot.Bot, update *m
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
 
-	currentState := reminderBot.f.Current(userID)
+	currentState := fsmStates.Current(userID)
 
 	switch currentState {
 	case stateDefault:
@@ -310,9 +312,9 @@ func (reminderBot *Bot) HandleDefault(ctx context.Context, b *bot.Bot, update *m
 		return
 
 	case stateAskReminder:
-		reminderBot.f.Set(userID, "reminder", update.Message.Text)
+		fsmStates.Set(userID, "reminder", update.Message.Text)
 
-		reminderBot.f.Transition(userID, stateAskTime, ContextStruct{
+		fsmStates.Transition(userID, stateAskTime, ContextStruct{
 			ctx:    ctx,
 			userId: TGUserId(userID),
 			chatId: TGChatId(chatID),
@@ -330,16 +332,16 @@ func (reminderBot *Bot) HandleDefault(ctx context.Context, b *bot.Bot, update *m
 
 		reminderTime = reminderTime.Add(-time.Hour * 3) // Add 3 hours to the time
 
-		reminderBot.f.Set(userID, "time", reminderTime)
+		fsmStates.Set(userID, "time", reminderTime)
 
-		reminderBot.f.Transition(userID, stateFinish, ContextStruct{
+		fsmStates.Transition(userID, stateFinish, ContextStruct{
 			ctx:    ctx,
 			userId: TGUserId(userID),
 			chatId: TGChatId(chatID),
 		})
 
 	case stateFinish:
-		reminderBot.f.Transition(userID, stateDefault)
+		fsmStates.Transition(userID, stateDefault)
 	}
 
 }
