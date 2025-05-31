@@ -1,4 +1,4 @@
-package config
+package reminder
 
 import (
 	"errors"
